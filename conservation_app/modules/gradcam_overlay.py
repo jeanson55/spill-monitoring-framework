@@ -1,10 +1,4 @@
-"""Detection-targeted Grad-CAM for the trained Ultralytics YOLO spill model.
-
-The heatmap targets class-score gradients from the detector anchors overlapping
-its predicted box and pools several strong anchors for broader spatial coverage.
-It is a qualitative explanation, not a spill segmentation mask, confidence map,
-or physical spill boundary.
-"""
+"""Original whole-image Layer 21 Activation Norm map for the YOLO spill model."""
 
 from __future__ import annotations
 
@@ -25,11 +19,11 @@ def generate_yolo_gradcam(
     frame_bgr: np.ndarray,
     *,
     image_size: int = 640,
-    layer_index: int = 15,
+    layer_index: int = 21,
     bbox_xyxy: tuple[float, float, float, float] | None = None,
     class_index: int = 0,
 ) -> tuple[np.ndarray, dict[str, float | str | int]]:
-    """Return detection-targeted Grad-CAM for one spill box in source pixels."""
+    """Return the original Layer 21 activation-norm heatmap for an image."""
     if frame_bgr is None or frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
         raise ValueError("Grad-CAM visualization requires a decoded color image")
     detector = getattr(yolo_model, "model", None)
@@ -40,19 +34,11 @@ def generate_yolo_gradcam(
         raise ValueError(f"YOLO model has no spatial layer at index {layer_index}")
 
     height, width = frame_bgr.shape[:2]
-    scale = min(image_size / width, image_size / height)
-    resized_width = max(1, int(round(width * scale)))
-    resized_height = max(1, int(round(height * scale)))
-    resized = cv2.resize(frame_bgr, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
-    pad_x, pad_y = (image_size - resized_width) / 2, (image_size - resized_height) / 2
-    left, top = int(round(pad_x - 0.1)), int(round(pad_y - 0.1))
-    right, bottom = image_size - resized_width - left, image_size - resized_height - top
-    padded = cv2.copyMakeBorder(resized, top, bottom, left, right,
-                                cv2.BORDER_CONSTANT, value=(114, 114, 114))
-    rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+    resized = cv2.resize(frame_bgr, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
     parameter = next(detector.parameters())
     tensor = torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1)))
-    tensor = (tensor.unsqueeze(0).to(device=parameter.device, dtype=torch.float32) / 255.0).requires_grad_(True)
+    tensor = tensor.unsqueeze(0).to(device=parameter.device, dtype=torch.float32) / 255.0
 
     captured: dict[str, torch.Tensor] = {}
 
@@ -67,11 +53,11 @@ def generate_yolo_gradcam(
     head = layers[-1]
     was_head_training = head.training
     detector.eval()
-    head.train()  # exposes differentiable class scores; no parameter is updated
+    head.train()
     try:
-        # Ultralytics DetectionModel.forward is inference-mode decorated in
-        # recent releases; direct layer traversal keeps autograd available.
-        with torch.enable_grad():
+        # Direct layer traversal exposes the selected feature map without
+        # invoking Ultralytics' inference-mode decorated forward method.
+        with torch.no_grad():
             current = tensor
             saved_outputs = []
             for module in layers:
@@ -81,76 +67,11 @@ def generate_yolo_gradcam(
                                      for source in module.f])
                 current = module(current)
                 saved_outputs.append(current if module.i in detector.save else None)
-            raw = current
         activation = captured.get("activation")
         if activation is None or activation.ndim != 4:
             raise RuntimeError(f"YOLO layer {layer_index} did not return a spatial feature map")
-        scores = raw.get("scores") if isinstance(raw, dict) else None
-        if not torch.is_tensor(scores) or scores.ndim != 3:
-            raise RuntimeError("YOLO head did not return differentiable detection scores")
-        if class_index < 0 or class_index >= scores.shape[1]:
-            raise ValueError(f"YOLO model has no class index {class_index}")
-        if bbox_xyxy is not None:
-            # Restrict the target to class-score anchors whose decoded boxes
-            # overlap this detection, then pool its strongest anchors.
-            decoded = head._inference(raw)[0, :4].detach().T
-            cx, cy, bw, bh = decoded.unbind(dim=1)
-            pred_boxes = torch.stack((cx - bw / 2, cy - bh / 2,
-                                      cx + bw / 2, cy + bh / 2), dim=1)
-            x1, y1, x2, y2 = bbox_xyxy
-            target_box = (x1 * scale + left, y1 * scale + top,
-                          x2 * scale + left, y2 * scale + top)
-            target = torch.tensor(target_box, device=pred_boxes.device,
-                                  dtype=pred_boxes.dtype)
-            inter_lo = torch.maximum(pred_boxes[:, :2], target[:2])
-            inter_hi = torch.minimum(pred_boxes[:, 2:], target[2:])
-            inter = (inter_hi - inter_lo).clamp(min=0).prod(dim=1)
-            pred_area = (pred_boxes[:, 2:] - pred_boxes[:, :2]).clamp(min=0).prod(dim=1)
-            target_area = (target[2:] - target[:2]).clamp(min=0).prod()
-            iou = inter / (pred_area + target_area - inter).clamp(min=1e-8)
-            relevant_indices = torch.where(iou >= max(0.1, float(iou.max().item()) * 0.5))[0]
-            if relevant_indices.numel() == 0:
-                relevant_indices = iou.argmax().reshape(1)
-        else:
-            target_box = None
-            relevant_indices = torch.arange(scores.shape[2], device=scores.device)
-        relevant_scores = scores[0, class_index, relevant_indices]
-        anchor_limit = 8
-        count = min(anchor_limit, relevant_scores.numel())
-        selected = torch.topk(relevant_scores, k=count).indices
-        selected_indices = relevant_indices[selected]
-        candidate_index = int(selected_indices[0].item())
-        selected_scores = scores[0, class_index, selected_indices]
-        target_score = selected_scores.mean()
-        # Build one Grad-CAM per selected, box-associated anchor and take their
-        # spatial union. Averaging gradients first can cancel localized signals
-        # from different parts of a large spill detection.
-        identity = torch.eye(count, device=selected_scores.device, dtype=selected_scores.dtype)
-        try:
-            gradients = torch.autograd.grad(
-                selected_scores, activation, grad_outputs=identity,
-                is_grads_batched=True, retain_graph=False, create_graph=False,
-                allow_unused=True,
-            )[0]
-            if gradients is not None:
-                gradients = gradients[:, 0]
-        except (TypeError, RuntimeError):
-            gradients = None
-        if gradients is None:
-            per_anchor_gradients = []
-            for anchor_idx in range(count):
-                gradient = torch.autograd.grad(
-                    selected_scores[anchor_idx], activation,
-                    retain_graph=anchor_idx < count - 1, create_graph=False,
-                    allow_unused=True,
-                )[0]
-                if gradient is None:
-                    raise RuntimeError("Target detection score is disconnected from the selected YOLO feature layer")
-                per_anchor_gradients.append(gradient[0])
-            gradients = torch.stack(per_anchor_gradients)
-        weights = gradients.mean(dim=(2, 3), keepdim=True)
-        per_anchor_cams = torch.relu((weights * activation[0].unsqueeze(0)).sum(dim=1))
-        cam_tensor = per_anchor_cams.amax(dim=0)
+        # This reproduces the original script's Layer 21 activation-norm map.
+        cam_tensor = activation[0].norm(dim=0)
         cam = cam_tensor.detach().float().cpu().numpy()
     finally:
         hook.remove()
@@ -160,25 +81,10 @@ def generate_yolo_gradcam(
     cam = np.maximum(cam - float(cam.min()), 0)
     maximum = float(cam.max())
     if maximum > 0:
-        # YOLO feature maps are coarse and often produce a few isolated peaks.
-        # A robust upper percentile prevents one peak from washing out weaker
-        # spill-related responses; mild smoothing/gamma are display-only.
-        display_scale = float(np.percentile(cam, 99.5))
-        cam /= max(display_scale, np.finfo(np.float32).eps)
-        cam = np.clip(cam, 0.0, 1.0)
-        cam = np.power(cam, 0.65)
-        cam = cv2.GaussianBlur(cam, (0, 0), sigmaX=1.0, sigmaY=1.0)
-        cam /= max(float(cam.max()), np.finfo(np.float32).eps)
-    cam = cv2.resize(cam, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
-    cam = cam[top:top + resized_height, left:left + resized_width]
+        cam /= maximum
     cam = cv2.resize(cam, (width, height), interpolation=cv2.INTER_LINEAR)
-    method = f"Grad-CAM (per-anchor union, top-{count} spill anchors)"
-    result_metadata: dict[str, float | str | int] = {"method": method, "layer": layer_index,
-                                    "candidate_index": candidate_index,
-                                    "target_score": float(target_score.detach().cpu()),
-                                    "anchors_aggregated": int(selected_indices.numel())}
-    if bbox_xyxy is not None:
-        result_metadata["associated_detection_box_xyxy"] = str(tuple(float(v) for v in bbox_xyxy))
+    method = "Activation Norm"
+    result_metadata: dict[str, float | str | int] = {"method": method, "layer": layer_index}
     return cam.astype(np.float32), result_metadata
 
 

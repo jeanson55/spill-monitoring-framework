@@ -46,10 +46,9 @@ The conservation prediction request body is:
 
 Those values are an example of the request shape only; use measured/calibrated values from the specific event. The model was trained on synthetic trajectories, so field use needs separate validation.
 
-For uploaded still images, the app produces a two-panel original/heatmap figure with a color bar. It computes class-score Grad-CAM at Layer 15 for the detector anchors whose decoded boxes overlap the selected spill detection, then combines the eight strongest per-anchor maps as a spatial union. Contrast scaling and light smoothing improve visibility. This gives broader spatial coverage than a single-anchor map, while the heatmap remains a qualitative explanation: it is not a spill segmentation mask, calibrated probability map, or physical boundary, and may respond to surrounding scene features. This explanation is generated for still images only; video processing is unchanged.
+For uploaded still images, the app reproduces the original Layer 21 activation-norm heatmap from the legacy explanation script, with the same two-panel layout and color bar. Although the figure retains the original “Grad-CAM” title, this method is an activation-norm visualization rather than gradient-based Grad-CAM. It is qualitative and is not a spill segmentation mask, calibrated probability map, or physical boundary. The explanation is generated for still images only; video processing is unchanged.
 
 The first slice processes uploaded video and image files. The dashboard keeps Webcam and RTSP controls in the reference layout but leaves them disabled until live-source processing is implemented. Event tracking/temporal confirmation and automatic derivation of calibrated model inputs are also later steps.
-
 
 
 
