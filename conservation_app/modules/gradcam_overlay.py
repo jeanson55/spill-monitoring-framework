@@ -90,35 +90,17 @@ def generate_yolo_gradcam(
             raise RuntimeError("YOLO head did not return differentiable detection scores")
         if class_index < 0 or class_index >= scores.shape[1]:
             raise ValueError(f"YOLO model has no class index {class_index}")
-        candidate_index = int(scores[0, class_index].detach().argmax().item())
+        count = min(20, scores.shape[2])
+        selected_indices = torch.topk(scores[0, class_index], k=count).indices
+        candidate_index = int(selected_indices[0].item())
         if bbox_xyxy is not None:
-            # Match the requested detector box against the head's decoded boxes.
-            decoded = head._inference(raw)[0, :4].detach().T
-            cx, cy, bw, bh = decoded.unbind(dim=1)
-            pred_boxes = torch.stack((cx - bw / 2, cy - bh / 2,
-                                      cx + bw / 2, cy + bh / 2), dim=1)
-            x1, y1, x2, y2 = bbox_xyxy
-            target = torch.tensor((x1 * scale + left, y1 * scale + top,
-                                   x2 * scale + left, y2 * scale + top),
-                                  device=pred_boxes.device, dtype=pred_boxes.dtype)
-            inter_lo = torch.maximum(pred_boxes[:, :2], target[:2])
-            inter_hi = torch.minimum(pred_boxes[:, 2:], target[2:])
-            inter = (inter_hi - inter_lo).clamp(min=0).prod(dim=1)
-            pred_area = (pred_boxes[:, 2:] - pred_boxes[:, :2]).clamp(min=0).prod(dim=1)
-            target_area = (target[2:] - target[:2]).clamp(min=0).prod()
-            iou = inter / (pred_area + target_area - inter).clamp(min=1e-8)
-            relevant = iou >= max(0.25, float(iou.max().item()) * 0.5)
-            relevant_indices = torch.where(relevant)[0]
-            if relevant_indices.numel() == 0:
-                relevant_indices = iou.argmax().reshape(1)
-            relevant_scores = scores[0, class_index, relevant_indices]
-            count = min(20, relevant_scores.numel())
-            selected = torch.topk(relevant_scores, k=count).indices
-            selected_indices = relevant_indices[selected]
-            candidate_index = int(selected_indices[0].item())
-            target_score = relevant_scores[selected].mean()
-        else:
-            target_score = scores[0, class_index, candidate_index]
+            # The detector box marks the instance to explain. Aggregate the
+            # strongest same-class anchors (rather than one anchor alone) so
+            # the saliency spreads across the instance's relevant features.
+            # Keep the bbox in metadata for reproducibility.
+            target_box = tuple(float(v) for v in bbox_xyxy)
+        selected_scores = scores[0, class_index, selected_indices]
+        target_score = selected_scores.mean()
         gradient = torch.autograd.grad(target_score, activation, retain_graph=False,
                                        create_graph=False, allow_unused=True)[0]
         if gradient is None:
@@ -138,10 +120,14 @@ def generate_yolo_gradcam(
     cam = cv2.resize(cam, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
     cam = cam[top:top + resized_height, left:left + resized_width]
     cam = cv2.resize(cam, (width, height), interpolation=cv2.INTER_LINEAR)
-    method = "Grad-CAM (detection-targeted)"
-    return cam.astype(np.float32), {"method": method, "layer": layer_index,
+    method = "Grad-CAM (top-20 spill anchors)"
+    result_metadata: dict[str, float | str | int] = {"method": method, "layer": layer_index,
                                     "candidate_index": candidate_index,
-                                    "target_score": float(target_score.detach().cpu())}
+                                    "target_score": float(target_score.detach().cpu()),
+                                    "anchors_aggregated": int(selected_indices.numel())}
+    if bbox_xyxy is not None:
+        result_metadata["associated_detection_box_xyxy"] = str(target_box)
+    return cam.astype(np.float32), result_metadata
 
 
 def render_gradcam_figure(
