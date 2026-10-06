@@ -1,10 +1,9 @@
-"""Layer-21 activation-norm visualization for the trained Ultralytics YOLO model.
+"""Detection-targeted Grad-CAM for the trained Ultralytics YOLO spill model.
 
-This reproduces the selected visualization strategy in the legacy
-``gradcam_explainability/grad_cam.py`` workflow. Activation Norm is an
-activation-based qualitative explanation, not gradient-weighted Grad-CAM,
-segmentation, confidence, or a physical spill boundary; the image title reports
-the exact method used.
+The heatmap targets class-score gradients from the detector anchors overlapping
+its predicted box and pools several strong anchors for broader spatial coverage.
+It is a qualitative explanation, not a spill segmentation mask, confidence map,
+or physical spill boundary.
 """
 
 from __future__ import annotations
@@ -26,9 +25,11 @@ def generate_yolo_gradcam(
     frame_bgr: np.ndarray,
     *,
     image_size: int = 640,
-    layer_index: int = 21,
+    layer_index: int = 15,
+    bbox_xyxy: tuple[float, float, float, float] | None = None,
+    class_index: int = 0,
 ) -> tuple[np.ndarray, dict[str, float | str | int]]:
-    """Return a normalized Layer 21 activation-norm map and its metadata."""
+    """Return detection-targeted Grad-CAM for one spill box in source pixels."""
     if frame_bgr is None or frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
         raise ValueError("Grad-CAM visualization requires a decoded color image")
     detector = getattr(yolo_model, "model", None)
@@ -51,7 +52,7 @@ def generate_yolo_gradcam(
     rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
     parameter = next(detector.parameters())
     tensor = torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1)))
-    tensor = tensor.unsqueeze(0).to(device=parameter.device, dtype=torch.float32) / 255.0
+    tensor = (tensor.unsqueeze(0).to(device=parameter.device, dtype=torch.float32) / 255.0).requires_grad_(True)
 
     captured: dict[str, torch.Tensor] = {}
 
@@ -66,11 +67,11 @@ def generate_yolo_gradcam(
     head = layers[-1]
     was_head_training = head.training
     detector.eval()
-    head.train()  # exposes the ordinary feature maps; no parameter is updated
+    head.train()  # exposes differentiable class scores; no parameter is updated
     try:
         # Ultralytics DetectionModel.forward is inference-mode decorated in
-        # recent releases; direct layer traversal keeps the activations available.
-        with torch.no_grad():
+        # recent releases; direct layer traversal keeps autograd available.
+        with torch.enable_grad():
             current = tensor
             saved_outputs = []
             for module in layers:
@@ -80,10 +81,51 @@ def generate_yolo_gradcam(
                                      for source in module.f])
                 current = module(current)
                 saved_outputs.append(current if module.i in detector.save else None)
+            raw = current
         activation = captured.get("activation")
         if activation is None or activation.ndim != 4:
             raise RuntimeError(f"YOLO layer {layer_index} did not return a spatial feature map")
-        cam = activation[0].float().norm(dim=0).cpu().numpy()
+        scores = raw.get("scores") if isinstance(raw, dict) else None
+        if not torch.is_tensor(scores) or scores.ndim != 3:
+            raise RuntimeError("YOLO head did not return differentiable detection scores")
+        if class_index < 0 or class_index >= scores.shape[1]:
+            raise ValueError(f"YOLO model has no class index {class_index}")
+        candidate_index = int(scores[0, class_index].detach().argmax().item())
+        if bbox_xyxy is not None:
+            # Match the requested detector box against the head's decoded boxes.
+            decoded = head._inference(raw)[0, :4].detach().T
+            cx, cy, bw, bh = decoded.unbind(dim=1)
+            pred_boxes = torch.stack((cx - bw / 2, cy - bh / 2,
+                                      cx + bw / 2, cy + bh / 2), dim=1)
+            x1, y1, x2, y2 = bbox_xyxy
+            target = torch.tensor((x1 * scale + left, y1 * scale + top,
+                                   x2 * scale + left, y2 * scale + top),
+                                  device=pred_boxes.device, dtype=pred_boxes.dtype)
+            inter_lo = torch.maximum(pred_boxes[:, :2], target[:2])
+            inter_hi = torch.minimum(pred_boxes[:, 2:], target[2:])
+            inter = (inter_hi - inter_lo).clamp(min=0).prod(dim=1)
+            pred_area = (pred_boxes[:, 2:] - pred_boxes[:, :2]).clamp(min=0).prod(dim=1)
+            target_area = (target[2:] - target[:2]).clamp(min=0).prod()
+            iou = inter / (pred_area + target_area - inter).clamp(min=1e-8)
+            relevant = iou >= max(0.25, float(iou.max().item()) * 0.5)
+            relevant_indices = torch.where(relevant)[0]
+            if relevant_indices.numel() == 0:
+                relevant_indices = iou.argmax().reshape(1)
+            relevant_scores = scores[0, class_index, relevant_indices]
+            count = min(20, relevant_scores.numel())
+            selected = torch.topk(relevant_scores, k=count).indices
+            selected_indices = relevant_indices[selected]
+            candidate_index = int(selected_indices[0].item())
+            target_score = relevant_scores[selected].mean()
+        else:
+            target_score = scores[0, class_index, candidate_index]
+        gradient = torch.autograd.grad(target_score, activation, retain_graph=False,
+                                       create_graph=False, allow_unused=True)[0]
+        if gradient is None:
+            raise RuntimeError("Target detection score is disconnected from the selected YOLO feature layer")
+        weights = gradient.mean(dim=(2, 3), keepdim=True)
+        cam_tensor = torch.relu((weights * activation).sum(dim=1))[0]
+        cam = cam_tensor.detach().float().cpu().numpy()
     finally:
         hook.remove()
         detector.train(was_training)
@@ -96,7 +138,10 @@ def generate_yolo_gradcam(
     cam = cv2.resize(cam, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
     cam = cam[top:top + resized_height, left:left + resized_width]
     cam = cv2.resize(cam, (width, height), interpolation=cv2.INTER_LINEAR)
-    return cam.astype(np.float32), {"method": "Activation Norm", "layer": layer_index}
+    method = "Grad-CAM (detection-targeted)"
+    return cam.astype(np.float32), {"method": method, "layer": layer_index,
+                                    "candidate_index": candidate_index,
+                                    "target_score": float(target_score.detach().cpu())}
 
 
 def render_gradcam_figure(

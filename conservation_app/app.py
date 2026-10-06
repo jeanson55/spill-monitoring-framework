@@ -268,7 +268,20 @@ def analyze_image():
     gradcam_figure = None
     gradcam_error = None
     try:
-        heatmap, gradcam_info = generate_yolo_gradcam(_detector, frame)
+        explained_maps = []
+        cam_boxes = results[0].boxes if results and results[0].boxes is not None else []
+        for cam_box in cam_boxes:
+            heatmap, gradcam_info = generate_yolo_gradcam(
+                _detector, frame,
+                bbox_xyxy=tuple(float(v) for v in cam_box.xyxy[0].tolist()),
+                class_index=int(cam_box.cls[0]),
+            )
+            explained_maps.append(heatmap)
+        if explained_maps:
+            heatmap = np.maximum.reduce(explained_maps)
+            gradcam_info = {**gradcam_info, "detections_explained": len(explained_maps)}
+        else:
+            heatmap, gradcam_info = generate_yolo_gradcam(_detector, frame)
         gradcam_figure = render_gradcam_figure(frame, heatmap, gradcam_info)
     except Exception as exc:
         gradcam_error = str(exc)
@@ -334,7 +347,6 @@ def outputs(filename: str):
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
-
 
 
 
