@@ -19,7 +19,7 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Open `http://127.0.0.1:5000`, upload an MP4/AVI/MOV/MKV/MPEG video or a JPG/PNG/WEBP/BMP image, then review the uploaded video with time-matched detector boxes/confidences overlaid, the annotated video download, and recorded JSON results. The browser overlay uses the original uploaded video so it does not depend on MP4 codec support.
+Open `http://127.0.0.1:5000`, upload an MP4/AVI/MOV/MKV/MPEG video or a JPG/PNG/WEBP/BMP image, then review the uploaded video with time-matched detector boxes/confidences overlaid, the annotated video download, and recorded JSON results. For still images, the app also generates an on-demand qualitative Grad-CAM overlay that can be toggled beside the standard detection result. The browser overlay uses the original uploaded video so it does not depend on MP4 codec support.
 
 ## Model boundary
 
@@ -45,6 +45,8 @@ The conservation prediction request body is:
 ```
 
 Those values are an example of the request shape only; use measured/calibrated values from the specific event. The model was trained on synthetic trajectories, so field use needs separate validation.
+
+For uploaded still images, Grad-CAM is computed from the trained YOLO detector’s differentiable class scores and a late spatial feature map. The overlay highlights image regions contributing to the selected strongest class score; it is qualitative and is not a spill segmentation mask, calibrated probability map, or physical boundary. Grad-CAM is not run on every video frame, so video processing latency and playback are unchanged.
 
 The first slice processes uploaded video and image files. The dashboard keeps Webcam and RTSP controls in the reference layout but leaves them disabled until live-source processing is implemented. Event tracking/temporal confirmation and automatic derivation of calibrated model inputs are also later steps.
 

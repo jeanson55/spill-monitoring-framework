@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
+from modules.gradcam_overlay import generate_yolo_gradcam
 
 APP_DIR = Path(__file__).resolve().parent
 NEW_ROOT = APP_DIR.parent
@@ -262,6 +263,14 @@ def analyze_image():
     job_id = uuid.uuid4().hex[:12]
     detections = []
     results = _detector.predict(frame, conf=0.25, verbose=False, device=DEVICE)
+    gradcam_frame = None
+    gradcam_info = None
+    gradcam_error = None
+    try:
+        gradcam_frame, gradcam_info = generate_yolo_gradcam(_detector, frame)
+    except Exception as exc:
+        gradcam_error = str(exc)
+        app.logger.warning("Still-image Grad-CAM unavailable: %s", exc)
     if results and results[0].boxes is not None:
         for box in results[0].boxes:
             bbox = tuple(float(v) for v in box.xyxy[0].tolist())
@@ -273,6 +282,9 @@ def analyze_image():
             caption = f"spill {confidence:.2f} | fluid: {fluid['label']} {fluid['confidence']:.2f}"
             cv2.rectangle(frame, (x1, y1), (x2, y2), (40, 190, 255), 2)
             cv2.putText(frame, caption, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (40, 190, 255), 2)
+            if gradcam_frame is not None:
+                cv2.rectangle(gradcam_frame, (x1, y1), (x2, y2), (40, 190, 255), 2)
+                cv2.putText(gradcam_frame, caption, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (40, 190, 255), 2)
             detections.append({
                 "bbox_px": [round(v, 2) for v in bbox],
                 "detector_confidence": confidence,
@@ -280,11 +292,18 @@ def analyze_image():
                 "conservation_status": "not evaluated: physical inputs/calibration required",
             })
     image_name = f"{job_id}_annotated.jpg"
+    gradcam_name = f"{job_id}_gradcam.jpg"
     results_name = f"{job_id}_results.json"
     cv2.imwrite(str(OUTPUT_DIR / image_name), frame)
-    payload = {"job_id": job_id, "source_name": safe_name, "models": _model_status, "detections": detections}
+    gradcam_url = None
+    if gradcam_frame is not None and cv2.imwrite(str(OUTPUT_DIR / gradcam_name), gradcam_frame):
+        gradcam_url = f"/outputs/{gradcam_name}"
+    payload = {"job_id": job_id, "source_name": safe_name, "models": _model_status,
+               "detections": detections, "gradcam": gradcam_info,
+               "gradcam_error": gradcam_error}
     (OUTPUT_DIR / results_name).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return jsonify({**payload, "annotated_image_url": f"/outputs/{image_name}", "results_url": f"/outputs/{results_name}"})
+    return jsonify({**payload, "annotated_image_url": f"/outputs/{image_name}",
+                    "gradcam_image_url": gradcam_url, "results_url": f"/outputs/{results_name}"})
 
 @app.post("/api/conservation/predict")
 def conservation_predict():
