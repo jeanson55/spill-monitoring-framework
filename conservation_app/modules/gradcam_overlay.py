@@ -90,23 +90,67 @@ def generate_yolo_gradcam(
             raise RuntimeError("YOLO head did not return differentiable detection scores")
         if class_index < 0 or class_index >= scores.shape[1]:
             raise ValueError(f"YOLO model has no class index {class_index}")
-        count = min(20, scores.shape[2])
-        selected_indices = torch.topk(scores[0, class_index], k=count).indices
-        candidate_index = int(selected_indices[0].item())
         if bbox_xyxy is not None:
-            # The detector box marks the instance to explain. Aggregate the
-            # strongest same-class anchors (rather than one anchor alone) so
-            # the saliency spreads across the instance's relevant features.
-            # Keep the bbox in metadata for reproducibility.
-            target_box = tuple(float(v) for v in bbox_xyxy)
+            # Restrict the target to class-score anchors whose decoded boxes
+            # overlap this detection, then pool its strongest anchors.
+            decoded = head._inference(raw)[0, :4].detach().T
+            cx, cy, bw, bh = decoded.unbind(dim=1)
+            pred_boxes = torch.stack((cx - bw / 2, cy - bh / 2,
+                                      cx + bw / 2, cy + bh / 2), dim=1)
+            x1, y1, x2, y2 = bbox_xyxy
+            target_box = (x1 * scale + left, y1 * scale + top,
+                          x2 * scale + left, y2 * scale + top)
+            target = torch.tensor(target_box, device=pred_boxes.device,
+                                  dtype=pred_boxes.dtype)
+            inter_lo = torch.maximum(pred_boxes[:, :2], target[:2])
+            inter_hi = torch.minimum(pred_boxes[:, 2:], target[2:])
+            inter = (inter_hi - inter_lo).clamp(min=0).prod(dim=1)
+            pred_area = (pred_boxes[:, 2:] - pred_boxes[:, :2]).clamp(min=0).prod(dim=1)
+            target_area = (target[2:] - target[:2]).clamp(min=0).prod()
+            iou = inter / (pred_area + target_area - inter).clamp(min=1e-8)
+            relevant_indices = torch.where(iou >= max(0.1, float(iou.max().item()) * 0.5))[0]
+            if relevant_indices.numel() == 0:
+                relevant_indices = iou.argmax().reshape(1)
+        else:
+            target_box = None
+            relevant_indices = torch.arange(scores.shape[2], device=scores.device)
+        relevant_scores = scores[0, class_index, relevant_indices]
+        anchor_limit = 8
+        count = min(anchor_limit, relevant_scores.numel())
+        selected = torch.topk(relevant_scores, k=count).indices
+        selected_indices = relevant_indices[selected]
+        candidate_index = int(selected_indices[0].item())
         selected_scores = scores[0, class_index, selected_indices]
         target_score = selected_scores.mean()
-        gradient = torch.autograd.grad(target_score, activation, retain_graph=False,
-                                       create_graph=False, allow_unused=True)[0]
-        if gradient is None:
-            raise RuntimeError("Target detection score is disconnected from the selected YOLO feature layer")
-        weights = gradient.mean(dim=(2, 3), keepdim=True)
-        cam_tensor = torch.relu((weights * activation).sum(dim=1))[0]
+        # Build one Grad-CAM per selected, box-associated anchor and take their
+        # spatial union. Averaging gradients first can cancel localized signals
+        # from different parts of a large spill detection.
+        identity = torch.eye(count, device=selected_scores.device, dtype=selected_scores.dtype)
+        try:
+            gradients = torch.autograd.grad(
+                selected_scores, activation, grad_outputs=identity,
+                is_grads_batched=True, retain_graph=False, create_graph=False,
+                allow_unused=True,
+            )[0]
+            if gradients is not None:
+                gradients = gradients[:, 0]
+        except (TypeError, RuntimeError):
+            gradients = None
+        if gradients is None:
+            per_anchor_gradients = []
+            for anchor_idx in range(count):
+                gradient = torch.autograd.grad(
+                    selected_scores[anchor_idx], activation,
+                    retain_graph=anchor_idx < count - 1, create_graph=False,
+                    allow_unused=True,
+                )[0]
+                if gradient is None:
+                    raise RuntimeError("Target detection score is disconnected from the selected YOLO feature layer")
+                per_anchor_gradients.append(gradient[0])
+            gradients = torch.stack(per_anchor_gradients)
+        weights = gradients.mean(dim=(2, 3), keepdim=True)
+        per_anchor_cams = torch.relu((weights * activation[0].unsqueeze(0)).sum(dim=1))
+        cam_tensor = per_anchor_cams.amax(dim=0)
         cam = cam_tensor.detach().float().cpu().numpy()
     finally:
         hook.remove()
@@ -116,17 +160,25 @@ def generate_yolo_gradcam(
     cam = np.maximum(cam - float(cam.min()), 0)
     maximum = float(cam.max())
     if maximum > 0:
-        cam /= maximum
+        # YOLO feature maps are coarse and often produce a few isolated peaks.
+        # A robust upper percentile prevents one peak from washing out weaker
+        # spill-related responses; mild smoothing/gamma are display-only.
+        display_scale = float(np.percentile(cam, 99.5))
+        cam /= max(display_scale, np.finfo(np.float32).eps)
+        cam = np.clip(cam, 0.0, 1.0)
+        cam = np.power(cam, 0.65)
+        cam = cv2.GaussianBlur(cam, (0, 0), sigmaX=1.0, sigmaY=1.0)
+        cam /= max(float(cam.max()), np.finfo(np.float32).eps)
     cam = cv2.resize(cam, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
     cam = cam[top:top + resized_height, left:left + resized_width]
     cam = cv2.resize(cam, (width, height), interpolation=cv2.INTER_LINEAR)
-    method = "Grad-CAM (top-20 spill anchors)"
+    method = f"Grad-CAM (per-anchor union, top-{count} spill anchors)"
     result_metadata: dict[str, float | str | int] = {"method": method, "layer": layer_index,
                                     "candidate_index": candidate_index,
                                     "target_score": float(target_score.detach().cpu()),
                                     "anchors_aggregated": int(selected_indices.numel())}
     if bbox_xyxy is not None:
-        result_metadata["associated_detection_box_xyxy"] = str(target_box)
+        result_metadata["associated_detection_box_xyxy"] = str(tuple(float(v) for v in bbox_xyxy))
     return cam.astype(np.float32), result_metadata
 
 
