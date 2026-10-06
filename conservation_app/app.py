@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
-from modules.gradcam_overlay import generate_yolo_gradcam
+from modules.gradcam_overlay import generate_yolo_gradcam, render_gradcam_figure
 
 APP_DIR = Path(__file__).resolve().parent
 NEW_ROOT = APP_DIR.parent
@@ -265,9 +265,11 @@ def analyze_image():
     results = _detector.predict(frame, conf=0.25, verbose=False, device=DEVICE)
     gradcam_frame = None
     gradcam_info = None
+    gradcam_figure = None
     gradcam_error = None
     try:
-        gradcam_frame, gradcam_info = generate_yolo_gradcam(_detector, frame)
+        heatmap, gradcam_info = generate_yolo_gradcam(_detector, frame)
+        gradcam_figure = render_gradcam_figure(frame, heatmap, gradcam_info)
     except Exception as exc:
         gradcam_error = str(exc)
         app.logger.warning("Still-image Grad-CAM unavailable: %s", exc)
@@ -282,9 +284,6 @@ def analyze_image():
             caption = f"spill {confidence:.2f} | fluid: {fluid['label']} {fluid['confidence']:.2f}"
             cv2.rectangle(frame, (x1, y1), (x2, y2), (40, 190, 255), 2)
             cv2.putText(frame, caption, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (40, 190, 255), 2)
-            if gradcam_frame is not None:
-                cv2.rectangle(gradcam_frame, (x1, y1), (x2, y2), (40, 190, 255), 2)
-                cv2.putText(gradcam_frame, caption, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (40, 190, 255), 2)
             detections.append({
                 "bbox_px": [round(v, 2) for v in bbox],
                 "detector_confidence": confidence,
@@ -296,7 +295,8 @@ def analyze_image():
     results_name = f"{job_id}_results.json"
     cv2.imwrite(str(OUTPUT_DIR / image_name), frame)
     gradcam_url = None
-    if gradcam_frame is not None and cv2.imwrite(str(OUTPUT_DIR / gradcam_name), gradcam_frame):
+    if gradcam_figure is not None:
+        (OUTPUT_DIR / gradcam_name).write_bytes(gradcam_figure)
         gradcam_url = f"/outputs/{gradcam_name}"
     payload = {"job_id": job_id, "source_name": safe_name, "models": _model_status,
                "detections": detections, "gradcam": gradcam_info,
@@ -334,7 +334,6 @@ def outputs(filename: str):
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
-
 
 
 

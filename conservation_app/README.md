@@ -46,7 +46,7 @@ The conservation prediction request body is:
 
 Those values are an example of the request shape only; use measured/calibrated values from the specific event. The model was trained on synthetic trajectories, so field use needs separate validation.
 
-For uploaded still images, Grad-CAM is computed from the trained YOLO detector’s differentiable class scores and a late spatial feature map. The overlay highlights image regions contributing to the selected strongest class score; it is qualitative and is not a spill segmentation mask, calibrated probability map, or physical boundary. Grad-CAM is not run on every video frame, so video processing latency and playback are unchanged.
+For uploaded still images, the app produces the two-panel visualization used by the legacy `grad_cam.py` workflow: the original image and a separate Layer 21 activation-norm heatmap with an intensity color bar. Activation Norm is an activation-based qualitative diagnostic, not gradient-weighted Grad-CAM, a spill segmentation mask, a calibrated probability map, or a physical boundary. The figure title reports the selected method. This explanation is generated for still images only; video processing is unchanged.
 
 The first slice processes uploaded video and image files. The dashboard keeps Webcam and RTSP controls in the reference layout but leaves them disabled until live-source processing is implemented. Event tracking/temporal confirmation and automatic derivation of calibrated model inputs are also later steps.
 
