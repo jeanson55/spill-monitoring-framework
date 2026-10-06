@@ -262,7 +262,9 @@ def analyze_image():
         return jsonify({"error": "The uploaded image could not be decoded."}), 400
     job_id = uuid.uuid4().hex[:12]
     detections = []
-    results = _detector.predict(frame, conf=0.25, verbose=False, device=DEVICE)
+    # Keep image inference's square padding consistent with Grad-CAM preprocessing
+    # so each explanation can match the detector's decoded box coordinates.
+    results = _detector.predict(frame, conf=0.25, verbose=False, device=DEVICE, rect=False)
     gradcam_frame = None
     gradcam_info = None
     gradcam_figure = None
@@ -347,6 +349,5 @@ def outputs(filename: str):
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
-
 
 
