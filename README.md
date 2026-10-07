@@ -1,6 +1,6 @@
 # Spill Monitoring Framework
 
-Public research package accompanying **Spill Monitoring Framework: Visual Spill Detection with a Conservation-Regularized Neural Field** and contains the trained spill detector, conservation-regularized neural-field model, datasets, scripts, results, and prototype application. It contains the trained YOLO spill detector, its train/validation/test data, the conservation PINN and simulation data, training/evaluation scripts, selected result files and figures, and a local prototype application.
+Public research package for visual spill detection and conservation-regularized neural-field modelling. It includes the trained YOLO detector, detector data, the conservation PINN checkpoint and simulation data, training and evaluation scripts, selected results and figures, and the prototype application.
 
 ## Contents
 
