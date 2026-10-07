@@ -4,18 +4,18 @@ Public research package accompanying **Spill Monitoring Framework: Visual Spill 
 
 ## Contents
 
-- `models/best_spill_detector.pt` — trained YOLOv8n spill detector selected for the manuscript.
+- `models/best_spill_detector.pt` — trained YOLOv8n spill detector selected for this project.
 - `dataset/yolo/` — YOLO train/validation/test images and labels with portable `data.yaml`.
 - `pinn/data/spill_trajectory_dataset.csv` — synthetic thin-film trajectory source data (about 1.09 GB; stored with Git LFS), plus metadata and summary.
 - `models/spill_pinn_stage2_ic_conservation_best.pt` — selected conservation-regularized PINN checkpoint. This model uses conservation regularization and initial-condition conditioning; it does not use a PDE-residual loss.
 - `pinn/scripts/` — trajectory generation, PINN data preparation, and selected PINN training script.
 - `code/yolo/` — baseline YOLO training and test/validation evaluation scripts.
-- `results/` — detector evaluation metrics and confusion matrices, PINN history and held-out predictions, plus the manuscript figures.
+- `results/` — detector evaluation metrics and confusion matrices, PINN history and held-out predictions, plus selected project figures.
 - `conservation_app/`, `fluid/` — local Flask prototype and the fluid-classifier module/model used by its integration.
 
 ## Reported detector test results
 
-On the held-out YOLO test partition (270 images), the saved baseline evaluation reports precision 0.991317, recall 0.991935, F1 0.991626, mAP@0.50 0.994431, and mAP@0.50:0.95 0.837986. The result files and confusion-matrix images are in `results/yolo/`. Treat these as results on this internal partition; they do not establish field performance. The manuscript also describes a separate 294-image wet-surface negative audit.
+On the held-out YOLO test partition (270 images), the saved baseline evaluation reports precision 0.991317, recall 0.991935, F1 0.991626, mAP@0.50 0.994431, and mAP@0.50:0.95 0.837986. The result files and confusion-matrix images are in `results/yolo/`. Treat these as results on this internal partition; they do not establish field performance. The project also includes a separate 294-image wet-surface negative audit.
 
 The neural-field results are against simulated held-out trajectories, not measured field spill thickness. Its physical inputs require calibration before real-world interpretation. The application does not infer physical quantities from image pixels.
 
